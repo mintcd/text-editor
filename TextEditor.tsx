@@ -81,7 +81,7 @@ export default function TextEditor({
   return (
     <>
       {!isEditing ? (
-        <span ref={previewRef as any} onClick={handlePreviewClick} className={`${inline ? 'inline-block' : 'block'} min-w-px min-h-4`}>
+        <span ref={previewRef as any} onClick={handlePreviewClick} className={`${inline ? 'inline' : 'block'} min-w-px min-h-4`}>
           {children ?? <Latex>{value ?? ''}</Latex>}
         </span>
       ) : (

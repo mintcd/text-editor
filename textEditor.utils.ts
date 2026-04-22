@@ -1,4 +1,4 @@
-import { renderLatexFragment } from '../Latex';
+import { renderLatexFragment } from './Latex';
 
 export const mathRegex = /(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\begin\{[a-zA-Z]+\}[\s\S]*?\\end\{[a-zA-Z]+\})/g;
 
