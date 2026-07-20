@@ -1,52 +1,49 @@
-import { renderLatexFragment } from './Latex';
+import {
+  defaultTextEditorPlugins,
+  escapeHtml,
+  getTextEditorTokens,
+  latexPlugin,
+  mathRegex,
+  type TextEditorPlugin,
+} from './textEditor.plugins';
 
-export const mathRegex = /(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\begin\{[a-zA-Z]+\}[\s\S]*?\\end\{[a-zA-Z]+\})/g;
-
-export const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export { escapeHtml, mathRegex };
 
 export const plainTextToHtml = (text = '') => escapeHtml(text).replace(/\n/g, '<br/>');
 
 export const renderKatexPreview = (raw: string, escapedRaw: string) => {
-  let rendered = escapedRaw;
-  try {
-    rendered = renderLatexFragment(raw);
-  } catch (e) { }
-
-  return `<span class="katex-preview" contenteditable="false" data-raw="${escapedRaw}" style="cursor: text; display: inline-block;">${rendered}</span>`;
+  return latexPlugin.renderInactive?.({ start: 0, end: raw.length, raw }) ?? escapedRaw;
 };
 
 // Convert plain text into HTML. If `caretOffset` is provided, only the
-// math segment that contains that character offset will be wrapped as a
-// `.latex-code` span; otherwise all math segments are wrapped.
-export const textToHtml = (text = '', caretOffset?: number) => {
-  const regex = new RegExp(mathRegex);
+// token that contains that character offset will be rendered as active;
+// otherwise all tokens are rendered as active to preserve the old behavior.
+export const textToHtml = (
+  text = '',
+  caretOffset?: number,
+  plugins: TextEditorPlugin[] = defaultTextEditorPlugins,
+) => {
+  const tokens = getTextEditorTokens(text, plugins);
   let lastIndex = 0;
   let out = '';
-  let m: RegExpExecArray | null;
-  const spanStyle = "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Segoe UI Mono', monospace; color: #065f46; background: rgba(16,185,129,0.06); padding: 0 4px; border-radius: 4px;";
 
-  while ((m = regex.exec(text))) {
-    if (m.index > lastIndex) {
-      out += escapeHtml(text.slice(lastIndex, m.index)).replace(/\n/g, '<br/>');
+  for (const token of tokens) {
+    if (token.start > lastIndex) {
+      out += escapeHtml(text.slice(lastIndex, token.start)).replace(/\n/g, '<br/>');
     }
-
-    const start = m.index;
-    const end = regex.lastIndex; // exclusive
-    const raw = m[0];
-    const escaped = escapeHtml(raw);
 
     if (typeof caretOffset === 'number') {
-      const isActive = caretOffset >= start && caretOffset <= end;
+      const isActive = caretOffset >= token.start && caretOffset <= token.end;
       if (isActive) {
-        out += `<span class="latex-code" style="${spanStyle}">${escaped}</span>`;
+        out += token.plugin.renderActive?.(token) ?? escapeHtml(token.raw);
       } else {
-        out += renderKatexPreview(raw, escaped);
+        out += token.plugin.renderInactive?.(token) ?? escapeHtml(token.raw);
       }
     } else {
-      out += `<span class="latex-code" style="${spanStyle}">${escaped}</span>`;
+      out += token.plugin.renderActive?.(token) ?? escapeHtml(token.raw);
     }
 
-    lastIndex = regex.lastIndex;
+    lastIndex = token.end;
   }
 
   if (lastIndex < text.length) {
@@ -54,6 +51,14 @@ export const textToHtml = (text = '', caretOffset?: number) => {
   }
   return out;
 };
+
+const isInactiveTokenElement = (el: HTMLElement) =>
+  el.getAttribute('data-token-mode') === 'inactive' ||
+  el.classList?.contains('katex-preview');
+
+const isActiveTokenElement = (el: HTMLElement) =>
+  el.getAttribute('data-token-mode') === 'active' ||
+  el.classList?.contains('latex-code');
 
 // Reconstruct plain text from DOM inside editable area.
 export const domToText = (el: HTMLElement) => {
@@ -69,13 +74,12 @@ export const domToText = (el: HTMLElement) => {
         text += '\n';
         return;
       }
-      if (n.classList && n.classList.contains('katex-preview')) {
+      if (isInactiveTokenElement(n)) {
         text += n.getAttribute('data-raw') ?? '';
         return;
       }
-      if (n.classList && n.classList.contains('latex-code')) {
-        // preserve the raw latex text (including delimiters) and
-        // do NOT recurse into children to avoid duplicating the inner text.
+      if (isActiveTokenElement(n)) {
+        // Active token spans render their source text directly.
         text += n.textContent ?? '';
         return;
       }
@@ -117,15 +121,15 @@ export const getCaretCharacterOffsetWithin = (element: HTMLElement) => {
       const el = node as HTMLElement;
       if (el.tagName === 'BR') {
         offset += 1;
-      } else if (el.classList?.contains('katex-preview')) {
+      } else if (isInactiveTokenElement(el)) {
         if (el.contains(sel.anchorNode)) {
-          // caret inside inactive katex node, snap to bounds
+          // caret inside an inactive token node, snap to bounds
           found = true;
         } else {
           offset += (el.getAttribute('data-raw') || '').length;
         }
-      } else if (el.classList?.contains('latex-code')) {
-        // recurse! because latex-code has normal text nodes
+      } else if (isActiveTokenElement(el)) {
+        // Active token spans have normal editable text nodes.
         for (let i = 0; i < el.childNodes.length; i++) {
           walkChild(el.childNodes[i]);
           if (found) return;
@@ -184,7 +188,7 @@ export const setCaretPosition = (element: HTMLElement, chars: number) => {
             return;
           }
           charCount += 1;
-        } else if (el.classList && el.classList.contains('katex-preview')) {
+        } else if (isInactiveTokenElement(el)) {
           const rawLen = (el.getAttribute('data-raw') || '').length;
           if (charCount + rawLen >= chars) {
             if (chars === charCount) {
@@ -197,34 +201,41 @@ export const setCaretPosition = (element: HTMLElement, chars: number) => {
             return;
           }
           charCount += rawLen;
-        } else if (el.classList && el.classList.contains('latex-code')) {
-          const txt = el.textContent ?? '';
-          const len = txt.length;
-          if (charCount + len >= chars) {
-            // put caret inside the first text node of the latex element
-            let targetNode: Node | null = null;
-            for (let j = 0; j < el.childNodes.length; j++) {
-              if (el.childNodes[j].nodeType === Node.TEXT_NODE) {
-                targetNode = el.childNodes[j];
-                break;
+        } else if (isActiveTokenElement(el)) {
+          const rawLen = (el.textContent || '').length;
+          if (charCount + rawLen >= chars) {
+            let remaining = Math.max(0, chars - charCount);
+
+            const placeInside = (target: Node) => {
+              if (found) return;
+              if (target.nodeType === Node.TEXT_NODE) {
+                const textLen = target.nodeValue?.length ?? 0;
+                if (remaining <= textLen) {
+                  range.setStart(target, remaining);
+                  range.collapse(true);
+                  found = true;
+                  return;
+                }
+                remaining -= textLen;
+                return;
               }
-            }
-            if (targetNode) {
-              range.setStart(targetNode, Math.max(0, chars - charCount));
-              range.collapse(true);
-              found = true;
-              return;
-            } else {
-              // fallback: place after element
+
+              for (let j = 0; j < target.childNodes.length; j++) {
+                placeInside(target.childNodes[j]);
+                if (found) return;
+              }
+            };
+
+            placeInside(el);
+            if (!found) {
               range.setStartAfter(el);
               range.collapse(true);
               found = true;
-              return;
             }
+            return;
           }
-          charCount += len;
+          charCount += rawLen;
         } else {
-          // recurse into children
           walk(Array.from(node.childNodes));
           if (found) return;
         }

@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from 'react';
-import Latex from '../Latex';
+import type { CSSProperties, ReactNode } from 'react';
+import Latex from './Latex';
 import { useTextEditor } from './useTextEditor';
+import type { TextEditorPlugin } from './textEditor.plugins';
 
 export default function TextEditor({
   value,
@@ -15,6 +17,7 @@ export default function TextEditor({
   onStartEditing,
   children,
   preserveHeightOnEdit = true,
+  plugins,
 }: {
   value?: string;
   onChange: (text: string) => void;
@@ -24,15 +27,16 @@ export default function TextEditor({
   inline?: boolean;
   isEditing?: boolean;
   onStartEditing?: (opts?: { initialCaretPoint?: { x: number; y: number } }) => void;
-  children?: React.ReactNode;
+  children?: ReactNode;
   preserveHeightOnEdit?: boolean;
+  plugins?: TextEditorPlugin[];
 }) {
   const previewRef = useRef<HTMLElement | null>(null);
   const [measuredPreviewHeight, setMeasuredPreviewHeight] = useState<number | null>(null);
 
   const {
     editableRef,
-    activeMath,
+    activeToken,
     previewPos,
     handleInput,
     handleBlur,
@@ -43,6 +47,7 @@ export default function TextEditor({
     onBlur,
     initialCaretPoint,
     onInitialCaretAssigned,
+    plugins,
   });
 
   // Clicking the preview requests edit mode. Measure preview height so we can
@@ -75,8 +80,13 @@ export default function TextEditor({
     };
   }, [isEditing, editableRef, previewRef, handleBlur]);
 
-  const editableStyle: any = { outline: 'none', whiteSpace: 'pre-wrap' };
+  const editableStyle: CSSProperties = {
+    outline: 'none',
+    whiteSpace: 'pre-wrap',
+    minHeight: measuredPreviewHeight ?? undefined,
+  };
 
+  const activePreview = activeToken?.plugin.renderFloatingPreview?.(activeToken.token);
 
   return (
     <>
@@ -97,12 +107,12 @@ export default function TextEditor({
             style={editableStyle}
           />
 
-          {activeMath && previewPos && (
+          {activePreview && previewPos && (
             <div
               className="z-50 p-2 rounded bg-white dark:bg-gray-700 shadow-lg"
               style={{ position: 'fixed', top: previewPos.top, left: Math.max(0, previewPos.left - 10), transform: 'translateY(calc(-100% - 6px))', minWidth: 80, maxWidth: 360 }}
             >
-              <Latex>{activeMath}</Latex>
+              {activePreview}
             </div>
           )}
         </>

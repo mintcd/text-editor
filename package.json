@@ -2,11 +2,13 @@
   "name": "@notes/text-editor",
   "version": "0.1.0",
   "private": true,
-  "main": "TextEditor.tsx",
+  "main": "index.ts",
   "type": "module",
   "files": [
     "TextEditor.tsx",
+    "Latex.tsx",
     "useTextEditor.ts",
+    "textEditor.plugins.ts",
     "textEditor.utils.ts",
     "index.ts"
   ]

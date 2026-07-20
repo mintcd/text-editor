@@ -1,6 +1,7 @@
 'use client'
 
 
+import type { CSSProperties } from 'react';
 import katex from 'katex';
 import 'katex/dist/katex.min.css';
 
@@ -155,7 +156,7 @@ export function renderLatexFragment(raw: string): string {
 
 export default function Latex({ children, style }: {
   children: string,
-  style?: React.CSSProperties
+  style?: CSSProperties
 }) {
   const delimiters = [
     { left: '$$', right: '$$', display: true },
@@ -180,7 +181,7 @@ export default function Latex({ children, style }: {
   return (
     <span
       className="__latex"
-      style={{ whiteSpace: 'pre-wrap' }}
+      style={{ whiteSpace: 'pre-wrap', ...style }}
       dangerouslySetInnerHTML={{ __html: renderedLatex }}
     />
   );
