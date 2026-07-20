@@ -29,6 +29,16 @@ export interface ActiveTextEditorToken {
   token: TextEditorToken;
 }
 
+type CaretPosition = {
+  offsetNode: Node;
+  offset: number;
+};
+
+type CaretPointDocument = Document & {
+  caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  caretPositionFromPoint?: (x: number, y: number) => CaretPosition | null;
+};
+
 function elementFromNode(node: Node | null) {
   if (!node) return null;
   return node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
@@ -217,11 +227,11 @@ export function useTextEditor({
       try {
         // Try modern / legacy APIs to get a caret range at the client point
         let range: Range | null = null;
-        const docAny = document as any;
-        if (docAny.caretRangeFromPoint) {
-          range = docAny.caretRangeFromPoint(x, y);
-        } else if (docAny.caretPositionFromPoint) {
-          const pos = docAny.caretPositionFromPoint(x, y);
+        const caretDocument = document as CaretPointDocument;
+        if (typeof caretDocument.caretRangeFromPoint === 'function') {
+          range = caretDocument.caretRangeFromPoint(x, y);
+        } else if (typeof caretDocument.caretPositionFromPoint === 'function') {
+          const pos = caretDocument.caretPositionFromPoint(x, y);
           if (pos) {
             range = document.createRange();
             range.setStart(pos.offsetNode, pos.offset);

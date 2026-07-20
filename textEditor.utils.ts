@@ -156,7 +156,7 @@ export const setCaretPosition = (element: HTMLElement, chars: number) => {
   const range = document.createRange();
   range.selectNodeContents(element);
   range.collapse(true);
-  let nodeStack: Node[] = Array.from(element.childNodes);
+  const nodeStack: Node[] = Array.from(element.childNodes);
   let charCount = 0;
   let found = false;
 

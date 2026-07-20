@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties, MouseEvent, ReactNode } from 'react';
 import Latex from './Latex';
 import { useTextEditor } from './useTextEditor';
 import type { TextEditorPlugin } from './textEditor.plugins';
@@ -31,7 +31,7 @@ export default function TextEditor({
   preserveHeightOnEdit?: boolean;
   plugins?: TextEditorPlugin[];
 }) {
-  const previewRef = useRef<HTMLElement | null>(null);
+  const previewRef = useRef<HTMLSpanElement | null>(null);
   const [measuredPreviewHeight, setMeasuredPreviewHeight] = useState<number | null>(null);
 
   const {
@@ -52,13 +52,13 @@ export default function TextEditor({
 
   // Clicking the preview requests edit mode. Measure preview height so we can
   // keep the editor at least that tall to avoid layout jumps for empty content.
-  function handlePreviewClick(e: any) {
+  function handlePreviewClick(e: MouseEvent<HTMLSpanElement>) {
     e.stopPropagation();
     if (previewRef.current && preserveHeightOnEdit) {
       const rect = previewRef.current.getBoundingClientRect();
       setMeasuredPreviewHeight(rect.height);
     }
-    const caret = { x: (e as any).clientX, y: (e as any).clientY };
+    const caret = { x: e.clientX, y: e.clientY };
     if (onStartEditing) onStartEditing({ initialCaretPoint: caret });
   }
 
@@ -91,7 +91,7 @@ export default function TextEditor({
   return (
     <>
       {!isEditing ? (
-        <span ref={previewRef as any} onClick={handlePreviewClick} className={`${inline ? 'inline' : 'block'} min-w-px min-h-4`}>
+        <span ref={previewRef} onClick={handlePreviewClick} className={`${inline ? 'inline' : 'block'} min-w-px min-h-4`}>
           {children ?? <Latex>{value ?? ''}</Latex>}
         </span>
       ) : (
