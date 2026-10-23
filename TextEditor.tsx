@@ -2,23 +2,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties, MouseEvent, ReactNode } from 'react';
-import Latex from './Latex';
 import { useTextEditor } from './useTextEditor';
-import type { TextEditorPlugin } from './textEditor.plugins';
+import { defaultTextEditorPlugins, type TextEditorPlugin } from './textEditor.plugins';
+import { textToHtml } from './textEditor.utils';
 
-export default function TextEditor({
-  value,
-  onChange,
-  onBlur,
-  initialCaretPoint,
-  onInitialCaretAssigned,
-  inline = false,
-  isEditing = false,
-  onStartEditing,
-  children,
-  preserveHeightOnEdit = true,
-  plugins,
-}: {
+export interface TextEditorProps {
   value?: string;
   onChange: (text: string) => void;
   onBlur?: (text: string) => void;
@@ -30,10 +18,25 @@ export default function TextEditor({
   children?: ReactNode;
   preserveHeightOnEdit?: boolean;
   plugins?: TextEditorPlugin[];
-}) {
+  'aria-label'?: string;
+}
+
+export default function TextEditor({
+  value = '',
+  onChange,
+  onBlur,
+  initialCaretPoint,
+  onInitialCaretAssigned,
+  inline = false,
+  isEditing = false,
+  onStartEditing,
+  children,
+  preserveHeightOnEdit = true,
+  plugins = defaultTextEditorPlugins,
+  'aria-label': label = 'Text editor',
+}: TextEditorProps) {
   const previewRef = useRef<HTMLSpanElement | null>(null);
   const [measuredPreviewHeight, setMeasuredPreviewHeight] = useState<number | null>(null);
-
   const {
     editableRef,
     activeToken,
@@ -41,58 +44,67 @@ export default function TextEditor({
     handleInput,
     handleBlur,
     handleFocus,
-  } = useTextEditor({
-    value,
-    onChange,
-    onBlur,
-    initialCaretPoint,
-    onInitialCaretAssigned,
-    plugins,
+    handlePaste,
+    handleCopy,
+    handleCut,
+    handleCompositionStart,
+    handleCompositionEnd,
+  } = useTextEditor<HTMLSpanElement>({
+    value, onChange, onBlur, initialCaretPoint, onInitialCaretAssigned, plugins, isEditing,
   });
 
-  // Clicking the preview requests edit mode. Measure preview height so we can
-  // keep the editor at least that tall to avoid layout jumps for empty content.
-  function handlePreviewClick(e: MouseEvent<HTMLSpanElement>) {
-    e.stopPropagation();
+  function startEditing(point?: { x: number; y: number }) {
     if (previewRef.current && preserveHeightOnEdit) {
-      const rect = previewRef.current.getBoundingClientRect();
-      setMeasuredPreviewHeight(rect.height);
+      setMeasuredPreviewHeight(previewRef.current.getBoundingClientRect().height);
     }
-    const caret = { x: e.clientX, y: e.clientY };
-    if (onStartEditing) onStartEditing({ initialCaretPoint: caret });
+    onStartEditing?.(point ? { initialCaretPoint: point } : undefined);
   }
 
-  // When editing, watch for outside clicks and treat them as a blur/save.
+  function handlePreviewClick(event: MouseEvent<HTMLSpanElement>) {
+    event.stopPropagation();
+    startEditing({ x: event.clientX, y: event.clientY });
+  }
+
   useEffect(() => {
     if (!isEditing) return;
-    function onDocClick(e: Event) {
-      const target = e.target as Node | null;
-      // If click is inside editor or inside the preview element, do nothing
-      if (editableRef.current && target && editableRef.current.contains(target)) return;
-      if (previewRef.current && target && previewRef.current.contains(target)) return;
+    function onOutsidePointer(event: Event) {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (editableRef.current?.contains(target)) return;
       handleBlur();
     }
-    document.addEventListener('mousedown', onDocClick);
-    document.addEventListener('touchstart', onDocClick);
-    return () => {
-      document.removeEventListener('mousedown', onDocClick);
-      document.removeEventListener('touchstart', onDocClick);
-    };
-  }, [isEditing, editableRef, previewRef, handleBlur]);
+    document.addEventListener('pointerdown', onOutsidePointer);
+    return () => document.removeEventListener('pointerdown', onOutsidePointer);
+  }, [isEditing, editableRef, handleBlur]);
 
   const editableStyle: CSSProperties = {
+    display: inline ? 'inline-block' : 'block',
     outline: 'none',
     whiteSpace: 'pre-wrap',
-    minHeight: measuredPreviewHeight ?? undefined,
+    overflowWrap: 'anywhere',
+    minHeight: preserveHeightOnEdit ? measuredPreviewHeight ?? '1em' : '1em',
   };
-
   const activePreview = activeToken?.plugin.renderFloatingPreview?.(activeToken.token);
 
   return (
     <>
       {!isEditing ? (
-        <span ref={previewRef} onClick={handlePreviewClick} className={`${inline ? 'inline' : 'block'} min-w-px min-h-4`}>
-          {children ?? <Latex>{value ?? ''}</Latex>}
+        <span
+          ref={previewRef}
+          onClick={handlePreviewClick}
+          role={onStartEditing ? 'button' : undefined}
+          tabIndex={onStartEditing ? 0 : undefined}
+          aria-label={onStartEditing ? 'Edit ' + label : undefined}
+          onKeyDown={(event) => {
+            if (onStartEditing && (event.key === 'Enter' || event.key === ' ')) {
+              event.preventDefault();
+              startEditing();
+            }
+          }}
+          className={(inline ? 'inline' : 'block') + ' min-w-px min-h-4'}
+          style={{ display: inline ? 'inline' : 'block', whiteSpace: 'pre-wrap', minWidth: 1, minHeight: '1em' }}
+        >
+          {children ?? <span dangerouslySetInnerHTML={{ __html: textToHtml(value, -1, plugins) }} />}
         </span>
       ) : (
         <>
@@ -100,17 +112,24 @@ export default function TextEditor({
             ref={editableRef}
             contentEditable
             suppressContentEditableWarning
-            className={`min-h-5 wrap-break-word text-inherit whitespace-pre-wrap ${inline ? 'inline-block' : 'block'}`}
+            role="textbox"
+            aria-label={label}
+            aria-multiline
+            className={'min-h-5 wrap-break-word text-inherit whitespace-pre-wrap ' + (inline ? 'inline-block' : 'block')}
             onInput={handleInput}
             onBlur={handleBlur}
             onFocus={handleFocus}
+            onPaste={handlePaste}
+            onCopy={handleCopy}
+            onCut={handleCut}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
             style={editableStyle}
           />
-
           {activePreview && previewPos && (
             <div
               className="z-50 p-2 rounded bg-white dark:bg-gray-700 shadow-lg"
-              style={{ position: 'fixed', top: previewPos.top, left: Math.max(0, previewPos.left - 10), transform: 'translateY(calc(-100% - 6px))', minWidth: 80, maxWidth: 360 }}
+              style={{ position: 'fixed', top: previewPos.top, left: previewPos.left, transform: 'translateY(calc(-100% - 6px))', minWidth: 80, maxWidth: 360, pointerEvents: 'none' }}
             >
               {activePreview}
             </div>

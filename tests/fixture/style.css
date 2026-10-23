@@ -1,0 +1,16 @@
+body {
+  margin: 32px;
+  color: #18212b;
+  background: white;
+  font-family: system-ui, sans-serif;
+}
+main { max-width: 850px; }
+.controls { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 24px; }
+button { padding: 8px 12px; }
+.editor-host { border: 1px solid #8796a5; padding: 12px; font-size: 20px; }
+.editor-host > span {
+  display: block;
+  min-height: 80px;
+  white-space: pre-wrap;
+}
+output[data-testid="value"] { display: block; white-space: pre-wrap; }

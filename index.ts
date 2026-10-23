@@ -1,4 +1,5 @@
 export { default } from './TextEditor';
+export type { TextEditorProps } from './TextEditor';
 export { useTextEditor } from './useTextEditor';
 export {
   defaultTextEditorPlugins,

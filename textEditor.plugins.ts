@@ -1,5 +1,6 @@
 import { createElement, type ReactNode } from 'react';
-import Latex, { renderLatexFragment } from './Latex';
+import Latex from './Latex';
+import { findLatexFragments, renderLatexFragment } from './latexRenderer';
 
 export type TextEditorTokenMode = 'active' | 'inactive';
 
@@ -23,7 +24,7 @@ export interface TextEditorPlugin {
 }
 
 export const escapeHtml = (s: string) =>
-  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\r/g, '&#13;');
 
 export const escapeAttribute = (s: string) =>
   escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -52,7 +53,9 @@ export function renderTokenSpan({
   return `<span data-editor-token="${escapeAttribute(pluginName)}" data-token-mode="${mode}" data-raw="${escapeAttribute(raw)}"${editableAttr}${classAttr}${styleAttr}>${html}</span>`;
 }
 
-export const mathRegex = /(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\begin\{[a-zA-Z]+\}[\s\S]*?\\end\{[a-zA-Z]+\})/g;
+// Kept for callers using the legacy regex. The scanner below also handles
+// escaped delimiters and nested braces, which cannot be expressed by this regex.
+export const mathRegex = /(\$\$[\s\S]*?\$\$|\$[\s\S]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\\begin\{([a-zA-Z]+\*?)\}[\s\S]*?\\end\{\2\})/g;
 
 const latexCodeStyle = "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, 'Roboto Mono', 'Segoe UI Mono', monospace; color: #065f46; background: rgba(16,185,129,0.06); padding: 0 4px; border-radius: 4px;";
 
@@ -60,20 +63,12 @@ export const latexPlugin: TextEditorPlugin = {
   name: 'latex',
 
   match(text: string) {
-    const regex = new RegExp(mathRegex.source, mathRegex.flags);
-    const tokens: TextEditorToken[] = [];
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(text))) {
-      tokens.push({
-        start: match.index,
-        end: regex.lastIndex,
-        raw: match[0],
-        type: 'math',
-      });
-    }
-
-    return tokens;
+    return findLatexFragments(text).map(({ start, end, raw }) => ({
+      start,
+      end,
+      raw,
+      type: 'math',
+    }));
   },
 
   renderActive(token) {
@@ -116,10 +111,11 @@ export function getTextEditorTokens(text: string, plugins: TextEditorPlugin[] = 
 
   for (const plugin of plugins) {
     for (const token of plugin.match(text)) {
-      if (token.start < 0 || token.end <= token.start || token.end > text.length) continue;
+      if (!Number.isInteger(token.start) || !Number.isInteger(token.end) ||
+        token.start < 0 || token.end <= token.start || token.end > text.length) continue;
       tokens.push({
         ...token,
-        raw: token.raw || text.slice(token.start, token.end),
+        raw: text.slice(token.start, token.end),
         plugin,
       });
     }

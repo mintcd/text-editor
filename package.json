@@ -2,14 +2,42 @@
   "name": "@notes/text-editor",
   "version": "0.1.0",
   "private": true,
+  "engines": { "node": ">=22.12.0" },
   "main": "index.ts",
+  "types": "index.ts",
   "type": "module",
   "files": [
     "TextEditor.tsx",
     "Latex.tsx",
+    "latexRenderer.ts",
     "useTextEditor.ts",
     "textEditor.plugins.ts",
+    "textEditor.history.ts",
     "textEditor.utils.ts",
     "index.ts"
-  ]
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:browser": "playwright test",
+    "dev:test": "vite tests/fixture --host 127.0.0.1 --port 4185 --strictPort"
+  },
+  "peerDependencies": {
+    "react": ">=18 <20"
+  },
+  "dependencies": {
+    "katex": "^0.16.45"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^6.0.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3",
+    "vite": "8.3.4"
+  }
 }

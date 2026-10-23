@@ -1,16 +1,19 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+"use client";
+
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import type { ClipboardEvent } from 'react';
+import { TextEditorHistory, type TextEditorSnapshot } from './textEditor.history';
 import {
   domToText,
   getCaretCharacterOffsetWithin,
+  getTextEditorSelection,
   setCaretPosition,
+  setTextEditorSelection,
   textToHtml,
-  plainTextToHtml,
 } from './textEditor.utils';
 import {
   defaultTextEditorPlugins,
-  getPluginByName,
   getTokenAtOffset,
-  type ResolvedTextEditorToken,
   type TextEditorPlugin,
   type TextEditorToken,
 } from './textEditor.plugins';
@@ -22,6 +25,8 @@ export interface UseTextEditorParams {
   initialCaretPoint?: { x: number; y: number } | null;
   onInitialCaretAssigned?: () => void;
   plugins?: TextEditorPlugin[];
+  /** Pass the component's edit mode so newly mounted editable nodes initialize. */
+  isEditing?: boolean;
 }
 
 export interface ActiveTextEditorToken {
@@ -29,283 +34,322 @@ export interface ActiveTextEditorToken {
   token: TextEditorToken;
 }
 
-type CaretPosition = {
-  offsetNode: Node;
-  offset: number;
-};
-
 type CaretPointDocument = Document & {
   caretRangeFromPoint?: (x: number, y: number) => Range | null;
-  caretPositionFromPoint?: (x: number, y: number) => CaretPosition | null;
+  caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
 };
 
-function elementFromNode(node: Node | null) {
-  if (!node) return null;
-  return node.nodeType === Node.TEXT_NODE ? node.parentElement : (node as HTMLElement);
-}
-
-function isActiveTokenElement(el: HTMLElement) {
-  return el.getAttribute('data-token-mode') === 'active' ||
-    el.classList?.contains('latex-code');
-}
-
-function findActiveTokenElement(node: Node | null, container: HTMLElement) {
-  let el = elementFromNode(node);
-  while (el && el !== container) {
-    if (isActiveTokenElement(el)) return el;
-    el = el.parentElement;
-  }
-  return null;
-}
-
-function activeTokenFromElement(
-  el: HTMLElement,
-  plugins: TextEditorPlugin[],
-): ActiveTextEditorToken | null {
-  const pluginName = el.getAttribute('data-editor-token') ||
-    (el.classList?.contains('latex-code') ? 'latex' : null);
-  if (!pluginName) return null;
-
-  const plugin = getPluginByName(pluginName, plugins);
-  if (!plugin) return null;
-
-  const raw = el.textContent ?? '';
-  return {
-    plugin,
-    token: {
-      start: 0,
-      end: raw.length,
-      raw,
-    },
-  };
-}
-
-function activeTokenFromResolved(token: ResolvedTextEditorToken): ActiveTextEditorToken {
-  return {
-    plugin: token.plugin,
-    token: {
-      start: token.start,
-      end: token.end,
-      raw: token.raw,
-      type: token.type,
-    },
-  };
-}
-
 function caretPreviewPosition() {
-  const sel = document.getSelection();
-  if (!sel || sel.rangeCount === 0) return null;
-
-  try {
-    const rangeRect = sel.getRangeAt(0).getBoundingClientRect();
-    let left = rangeRect.left;
-    const maxLeft = Math.max(8, window.innerWidth - 360 - 8);
-    if (left > maxLeft) left = maxLeft;
-
-    return {
-      top: rangeRect.top,
-      left,
-    };
-  } catch (e) {
-    return null;
-  }
+  const selection = document.getSelection();
+  if (!selection?.rangeCount) return null;
+  const rect = selection.getRangeAt(0).getBoundingClientRect();
+  return {
+    top: rect.top,
+    left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)),
+  };
 }
 
-export function useTextEditor({
-  value,
+export function useTextEditor<EditableElement extends HTMLElement = HTMLDivElement>({
+  value = '',
   onChange,
   onBlur,
   initialCaretPoint,
   onInitialCaretAssigned,
   plugins = defaultTextEditorPlugins,
+  isEditing = true,
 }: UseTextEditorParams) {
-  const editableRef = useRef<HTMLDivElement | null>(null);
+  const editableRef = useRef<EditableElement | null>(null);
   const [activeToken, setActiveToken] = useState<ActiveTextEditorToken | null>(null);
   const [previewPos, setPreviewPos] = useState<{ top: number; left: number } | null>(null);
-  const programmaticChange = useRef(false);
+  const composing = useRef(false);
+  const history = useRef(new TextEditorHistory());
+  const pendingInput = useRef<{ snapshot: TextEditorSnapshot; kind: string } | null>(null);
+  const committed = useRef(false);
+  const lastNotified = useRef(value);
+  const changingDom = useRef(false);
+  const frame = useRef<number | null>(null);
+  const mountedElement = useRef<HTMLElement | null>(null);
+  const latest = useRef({ value, onInitialCaretAssigned });
+  latest.current = { value, onInitialCaretAssigned };
 
-  const setActivePreview = useCallback((nextToken: ActiveTextEditorToken | null) => {
-    if (!nextToken || !nextToken.plugin.renderFloatingPreview) {
-      setActiveToken(null);
-      setPreviewPos(null);
-      return;
-    }
-
-    setActiveToken(nextToken);
-    setPreviewPos(caretPreviewPosition());
+  const clearPreview = useCallback(() => {
+    setActiveToken(null);
+    setPreviewPos(null);
   }, []);
 
-  // Update innerHTML when the external value changes (but don't clobber while focused).
-  useEffect(() => {
-    const el = editableRef.current;
-    if (!el) return;
-    if (document.activeElement === el) return;
-    el.innerHTML = textToHtml(value ?? '', undefined, plugins);
-  }, [value, plugins]);
-
-  // When the selection changes, detect whether the caret is inside a plugin
-  // token and re-render active/inactive decorations around the caret.
-  const updateActiveToken = useCallback(() => {
-    if (programmaticChange.current) return;
-
-    const sel = document.getSelection();
-    if (!sel || sel.rangeCount === 0) {
-      setActivePreview(null);
-      return;
-    }
-
-    const node = sel.anchorNode;
-    const container = editableRef.current;
-    if (!node || !container || !container.contains(node)) {
-      setActivePreview(null);
-      return;
-    }
-
-    const activeEl = findActiveTokenElement(node, container);
-    if (activeEl) {
-      setActivePreview(activeTokenFromElement(activeEl, plugins));
-      return;
-    }
-
-    const caretOffset = getCaretCharacterOffsetWithin(container);
-    const txt = domToText(container);
-    const foundToken = getTokenAtOffset(txt, caretOffset, plugins);
-    const newHtml = textToHtml(txt, caretOffset, plugins);
-
-    if (!foundToken) {
-      setActivePreview(null);
-    }
-
-    if (container.innerHTML === newHtml) {
-      if (foundToken) {
-        programmaticChange.current = true;
-        try {
-          setCaretPosition(container, caretOffset);
-          setActivePreview(activeTokenFromResolved(foundToken));
-        } finally {
-          requestAnimationFrame(() => {
-            programmaticChange.current = false;
-          });
-        }
-      }
-      return;
-    }
-
-    programmaticChange.current = true;
-    try {
-      container.innerHTML = newHtml;
-      setCaretPosition(container, caretOffset);
-      setActivePreview(foundToken ? activeTokenFromResolved(foundToken) : null);
-    } finally {
-      requestAnimationFrame(() => {
-        programmaticChange.current = false;
-      });
-    }
-  }, [plugins, setActivePreview]);
-
-  useEffect(() => {
-    document.addEventListener('selectionchange', updateActiveToken);
-    return () => document.removeEventListener('selectionchange', updateActiveToken);
-  }, [updateActiveToken]);
-
-  // If a client coordinate was provided when entering edit mode, try to
-  // place the caret at that viewport point inside the editable element.
-  useEffect(() => {
-    if (!initialCaretPoint) return;
-    const el = editableRef.current;
-    if (!el) return;
-
-    requestAnimationFrame(() => {
-      // ensure content is rendered as plain text so caret-from-point works
-      if (!el.innerHTML || el.innerHTML.trim() === '') el.innerHTML = plainTextToHtml(value ?? '');
-      el.focus();
-
-      const x = initialCaretPoint.x;
-      const y = initialCaretPoint.y;
-      let assigned = false;
-
-      try {
-        // Try modern / legacy APIs to get a caret range at the client point
-        let range: Range | null = null;
-        const caretDocument = document as CaretPointDocument;
-        if (typeof caretDocument.caretRangeFromPoint === 'function') {
-          range = caretDocument.caretRangeFromPoint(x, y);
-        } else if (typeof caretDocument.caretPositionFromPoint === 'function') {
-          const pos = caretDocument.caretPositionFromPoint(x, y);
-          if (pos) {
-            range = document.createRange();
-            range.setStart(pos.offsetNode, pos.offset);
-            range.collapse(true);
-          }
-        }
-
-        if (range && el.contains(range.startContainer)) {
-          const sel = document.getSelection();
-          if (sel) {
-            sel.removeAllRanges();
-            sel.addRange(range);
-            assigned = true;
-          }
-        }
-      } catch (e) {
-        // ignore
-      }
-
-      const txt = domToText(el);
-      let caret = 0;
-      if (assigned) {
-        caret = getCaretCharacterOffsetWithin(el);
-      } else {
-        // Fallback: approximate caret position horizontally across the text
-        const rect = el.getBoundingClientRect();
-        const relX = Math.max(0, Math.min(1, (x - rect.left) / Math.max(1, rect.width)));
-        caret = Math.round(relX * (txt.length || 0));
-      }
-
-      const newHtml = textToHtml(txt, caret, plugins);
-      if (el.innerHTML !== newHtml) el.innerHTML = newHtml;
-      setCaretPosition(el, caret);
-
-      if (onInitialCaretAssigned) onInitialCaretAssigned();
+  const rewrite = useCallback((element: HTMLElement, text: string, caret?: number) => {
+    const html = textToHtml(text, caret, plugins);
+    if (element.innerHTML === html) return;
+    const selection = getTextEditorSelection(element);
+    changingDom.current = true;
+    element.innerHTML = html;
+    if (selection) setTextEditorSelection(element, selection);
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(() => {
+      changingDom.current = false;
+      frame.current = null;
     });
-  }, [initialCaretPoint, value, onInitialCaretAssigned, plugins]);
+  }, [plugins]);
+
+  // Controlled values are authoritative, including when a different Page is
+  // loaded while focus remains in the editor.
+  useLayoutEffect(() => {
+    const element = editableRef.current;
+    if (!isEditing || !element) {
+      mountedElement.current = null;
+      return;
+    }
+    if (composing.current) return;
+    const starting = mountedElement.current !== element;
+    mountedElement.current = element;
+    const externalChange = domToText(element) !== value;
+    if (starting || externalChange) {
+      history.current.reset();
+      pendingInput.current = null;
+    }
+    const selection = getTextEditorSelection(element);
+    const focused = document.activeElement === element;
+    rewrite(element, value, focused && selection ? selection.focus : undefined);
+    lastNotified.current = value;
+    if (starting && !initialCaretPoint) {
+      element.focus();
+      setCaretPosition(element, value.length);
+    }
+    if (externalChange) clearPreview();
+  }, [value, isEditing, initialCaretPoint, rewrite, clearPreview]);
+
+  useEffect(() => {
+    if (isEditing) committed.current = false;
+    else {
+      composing.current = false;
+      clearPreview();
+    }
+    return () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+      frame.current = null;
+      changingDom.current = false;
+    };
+  }, [isEditing, clearPreview]);
+
+  const showPreview = useCallback((text: string, caret: number) => {
+    const token = getTokenAtOffset(text, caret, plugins);
+    if (token?.plugin.renderFloatingPreview) {
+      setActiveToken({ plugin: token.plugin, token });
+      setPreviewPos(caretPreviewPosition());
+    } else {
+      clearPreview();
+    }
+  }, [plugins, clearPreview]);
+
+  const updateActiveToken = useCallback(() => {
+    const element = editableRef.current;
+    if (!isEditing || !element || composing.current || changingDom.current) return;
+    const selection = getTextEditorSelection(element);
+    if (!selection || selection.anchor !== selection.focus) {
+      clearPreview();
+      return;
+    }
+    const text = domToText(element);
+    rewrite(element, text, selection.focus);
+    showPreview(text, selection.focus);
+  }, [isEditing, rewrite, showPreview, clearPreview]);
+
+  useEffect(() => {
+    if (!isEditing) return;
+    document.addEventListener('selectionchange', updateActiveToken);
+    window.addEventListener('resize', updateActiveToken);
+    window.addEventListener('scroll', updateActiveToken, true);
+    return () => {
+      document.removeEventListener('selectionchange', updateActiveToken);
+      window.removeEventListener('resize', updateActiveToken);
+      window.removeEventListener('scroll', updateActiveToken, true);
+    };
+  }, [isEditing, updateActiveToken]);
+
+  useEffect(() => {
+    if (!isEditing || !initialCaretPoint) return;
+    const element = editableRef.current;
+    if (!element) return;
+    const caretFrame = requestAnimationFrame(() => {
+      if (editableRef.current !== element) return;
+      element.focus();
+      const caretDocument = document as CaretPointDocument;
+      const { x, y } = initialCaretPoint;
+      let range: Range | null = null;
+      if (caretDocument.caretRangeFromPoint) {
+        range = caretDocument.caretRangeFromPoint(x, y);
+      } else if (caretDocument.caretPositionFromPoint) {
+        const point = caretDocument.caretPositionFromPoint(x, y);
+        if (point) {
+          range = document.createRange();
+          range.setStart(point.offsetNode, point.offset);
+          range.collapse(true);
+        }
+      }
+      if (range && element.contains(range.startContainer)) {
+        const selection = document.getSelection();
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+      } else {
+        setCaretPosition(element, latest.current.value.length);
+      }
+      const caret = getCaretCharacterOffsetWithin(element);
+      rewrite(element, domToText(element), caret);
+      setCaretPosition(element, caret);
+      latest.current.onInitialCaretAssigned?.();
+    });
+    return () => cancelAnimationFrame(caretFrame);
+  }, [isEditing, initialCaretPoint, rewrite]);
+
+  const snapshot = useCallback((): TextEditorSnapshot | null => {
+    const element = editableRef.current;
+    if (!element) return null;
+    const text = domToText(element);
+    return {
+      text,
+      selection: getTextEditorSelection(element) ?? { anchor: text.length, focus: text.length },
+    };
+  }, []);
+
+  const notifyChange = useCallback((text: string) => {
+    committed.current = false;
+    if (text !== lastNotified.current) {
+      const after = snapshot();
+      const before = pendingInput.current?.snapshot ?? {
+        text: lastNotified.current,
+        selection: { anchor: lastNotified.current.length, focus: lastNotified.current.length },
+      };
+      if (after) history.current.record(before, after, pendingInput.current?.kind ?? 'other');
+      lastNotified.current = text;
+      onChange(text);
+    }
+    pendingInput.current = null;
+  }, [onChange, snapshot]);
+
+  const restoreHistory = useCallback((direction: 'undo' | 'redo') => {
+    const current = snapshot();
+    const element = editableRef.current;
+    if (!current || !element) return;
+    const next = history.current[direction](current);
+    pendingInput.current = null;
+    if (!next) return;
+    rewrite(element, next.text, next.selection.focus);
+    setTextEditorSelection(element, next.selection);
+    committed.current = false;
+    lastNotified.current = next.text;
+    onChange(next.text);
+    showPreview(next.text, next.selection.focus);
+  }, [snapshot, rewrite, onChange, showPreview]);
 
   const handleInput = useCallback(() => {
-    const el = editableRef.current;
-    if (!el) return;
-    // capture caret position in plain-text representation before we modify DOM
-    const caret = getCaretCharacterOffsetWithin(el);
-    const txt = domToText(el);
-    const newHtml = textToHtml(txt, caret, plugins);
-    if (el.innerHTML !== newHtml) {
-      el.innerHTML = newHtml;
-      setCaretPosition(el, caret);
+    const element = editableRef.current;
+    if (!element || composing.current) return;
+    const text = domToText(element);
+    const caret = getCaretCharacterOffsetWithin(element);
+    rewrite(element, text, caret);
+    notifyChange(text);
+    showPreview(text, caret);
+  }, [rewrite, notifyChange, showPreview]);
+
+  const handleCompositionStart = useCallback(() => {
+    composing.current = true;
+    const before = snapshot();
+    if (before) pendingInput.current = { snapshot: before, kind: 'insertCompositionText' };
+    clearPreview();
+  }, [clearPreview, snapshot]);
+
+  const handleCompositionEnd = useCallback(() => {
+    composing.current = false;
+    handleInput();
+  }, [handleInput]);
+
+  const insertText = useCallback((text: string, kind = 'insertFromPaste') => {
+    const element = editableRef.current;
+    if (!element) return;
+    const selection = getTextEditorSelection(element);
+    if (!selection) return;
+    const source = domToText(element);
+    pendingInput.current = { snapshot: { text: source, selection }, kind };
+    const start = Math.min(selection.anchor, selection.focus);
+    const end = Math.max(selection.anchor, selection.focus);
+    const next = source.slice(0, start) + text + source.slice(end);
+    rewrite(element, next, start + text.length);
+    setCaretPosition(element, start + text.length);
+    notifyChange(next);
+  }, [rewrite, notifyChange]);
+
+  // Native pre-wrap Enter can insert an extra invisible LF as a caret
+  // placeholder. Insert one source newline explicitly instead.
+  useEffect(() => {
+    const element = editableRef.current;
+    if (!isEditing || !element) return;
+    function handleBeforeInput(event: InputEvent) {
+      if (composing.current || event.isComposing) return;
+      if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
+        event.preventDefault();
+        restoreHistory(event.inputType === 'historyUndo' ? 'undo' : 'redo');
+      } else if (event.inputType === 'insertParagraph' || event.inputType === 'insertLineBreak') {
+        event.preventDefault();
+        insertText('\n', event.inputType);
+      } else {
+        const before = snapshot();
+        if (before) pendingInput.current = { snapshot: before, kind: event.inputType };
+      }
     }
-    onChange(txt);
-  }, [onChange, plugins]);
+    function handleKeyDown(event: KeyboardEvent) {
+      if (composing.current || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key !== 'z' && !(key === 'y' && event.ctrlKey)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      restoreHistory(key === 'y' || event.shiftKey ? 'redo' : 'undo');
+    }
+    element.addEventListener('beforeinput', handleBeforeInput);
+    element.addEventListener('keydown', handleKeyDown);
+    return () => {
+      element.removeEventListener('beforeinput', handleBeforeInput);
+      element.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isEditing, insertText, restoreHistory, snapshot]);
+
+  const handlePaste = useCallback((event: ClipboardEvent<HTMLElement>) => {
+    event.preventDefault();
+    insertText(event.clipboardData.getData('text/plain').replace(/\r\n?/g, '\n'));
+  }, [insertText]);
+
+  const handleCopy = useCallback((event: ClipboardEvent<HTMLElement>) => {
+    const element = editableRef.current;
+    if (!element) return;
+    const selection = getTextEditorSelection(element);
+    if (!selection || selection.anchor === selection.focus) return;
+    const text = domToText(element);
+    event.clipboardData.setData('text/plain', text.slice(
+      Math.min(selection.anchor, selection.focus),
+      Math.max(selection.anchor, selection.focus),
+    ));
+    event.preventDefault();
+  }, []);
+
+  const handleCut = useCallback((event: ClipboardEvent<HTMLElement>) => {
+    handleCopy(event);
+    if (event.defaultPrevented) insertText('', 'deleteByCut');
+  }, [handleCopy, insertText]);
 
   const handleBlur = useCallback(() => {
-    const el = editableRef.current;
-    if (!el) return;
-    const txt = domToText(el);
-    if (onBlur) onBlur(txt);
-    setActivePreview(null);
-  }, [onBlur, setActivePreview]);
+    const element = editableRef.current;
+    if (!element || committed.current) return;
+    const text = domToText(element);
+    composing.current = false;
+    notifyChange(text);
+    committed.current = true;
+    clearPreview();
+    onBlur?.(text);
+  }, [onBlur, notifyChange, clearPreview]);
 
   const handleFocus = useCallback(() => {
-    const el = editableRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => {
-      if (!el.innerHTML || el.innerHTML.trim() === '') el.innerHTML = plainTextToHtml(value ?? '');
-      const caret = getCaretCharacterOffsetWithin(el);
-      const txt = domToText(el);
-      const newHtml = textToHtml(txt, caret, plugins);
-      if (el.innerHTML !== newHtml) {
-        el.innerHTML = newHtml;
-        setCaretPosition(el, caret);
-      }
-    });
-  }, [value, plugins]);
+    committed.current = false;
+    updateActiveToken();
+  }, [updateActiveToken]);
 
   return {
     editableRef,
@@ -315,5 +359,10 @@ export function useTextEditor({
     handleInput,
     handleBlur,
     handleFocus,
+    handlePaste,
+    handleCopy,
+    handleCut,
+    handleCompositionStart,
+    handleCompositionEnd,
   };
 }
