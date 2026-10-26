@@ -1,13 +1,133 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import type {} from './fixture/main';
+import type {} from './fixture/main.tsx';
 
-async function openFixture(page: Page, value: string, options: { editing?: boolean; plugins?: string } = {}) {
+async function openFixture(page: Page, value: string, options: { editing?: boolean; plugins?: string; references?: string } = {}) {
   const params = new URLSearchParams({ value });
   if (options.editing) params.set('editing', '1');
   if (options.plugins) params.set('plugins', options.plugins);
+  if (options.references) params.set('references', options.references);
   await page.goto('/?' + params);
   await expect(page.getByTestId('value')).toHaveJSProperty('textContent', value);
 }
+
+test('backslash references search labels and descriptions and insert as one undo step', async ({ page }) => {
+  await openFixture(page, 'See ', { editing: true, references: '1' });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.press('ControlOrMeta+End');
+  await editor.pressSequentially('\\measure');
+  const menu = page.getByRole('listbox', { name: 'References' });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole('option')).toHaveCount(1);
+  await expect(menu.getByRole('option')).toContainText('Egoroff theorem');
+  await editor.press('Enter');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'See [Egoroff theorem](statement:egoroff)');
+  await expect(menu).toHaveCount(0);
+  await editor.press('ControlOrMeta+Z');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'See \\measure');
+  await editor.press('ControlOrMeta+Shift+Z');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'See [Egoroff theorem](statement:egoroff)');
+});
+
+test('reference arrows and pointer selection preserve caret and do not blur the source', async ({ page }) => {
+  await openFixture(page, 'Before ', { editing: true, references: '1' });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.press('ControlOrMeta+End');
+  await editor.pressSequentially('\\');
+  const menu = page.getByRole('listbox', { name: 'References' });
+  await expect(menu.getByRole('option')).toHaveCount(3);
+  await editor.press('ArrowDown');
+  await expect(menu.getByRole('option').nth(1)).toHaveAttribute('aria-selected', 'true');
+  await menu.getByRole('option').nth(1).click();
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'Before [Egoroff theorem](statement:egoroff)');
+  await expect(editor).toBeFocused();
+  await expect(page.getByTestId('blur-count')).toHaveText('0');
+  await editor.pressSequentially(' after');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'Before [Egoroff theorem](statement:egoroff) after');
+});
+
+test('empty results and Escape preserve the literal query and normal Enter editing', async ({ page }) => {
+  await openFixture(page, '', { editing: true, references: '1' });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.pressSequentially('\\notfound');
+  await expect(page.getByRole('listbox').getByRole('status')).toHaveText('No matching references.');
+  await editor.press('Escape');
+  await expect(page.getByRole('listbox')).toHaveCount(0);
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', '\\notfound');
+  await editor.press('Enter');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', '\\notfound\n');
+});
+
+test('reference completion leaves unfinished math, inline code, and escaped slashes alone', async ({ page }) => {
+  for (const value of ['$x+ \\cauchy', '\\(x+ \\cauchy', '`code \\cauchy', '\\\\cauchy']) {
+    await openFixture(page, value, { editing: true, references: '1' });
+    const editor = page.getByRole('textbox', { name: 'Text editor' });
+    await editor.press('ControlOrMeta+End');
+    await editor.pressSequentially('a');
+    await expect(page.getByRole('listbox')).toHaveCount(0);
+    await expect(page.getByTestId('value')).toHaveJSProperty('textContent', `${value}a`);
+  }
+});
+
+test('a dismissed reference can be searched again after changing the source', async ({ page }) => {
+  await openFixture(page, '', { editing: true, references: '1' });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.pressSequentially('\\cauchy');
+  await expect(page.getByRole('option')).toContainText('Cauchy sequence');
+  await editor.press('Escape');
+  await expect(page.getByRole('listbox')).toHaveCount(0);
+  await editor.press('ControlOrMeta+A');
+  await editor.press('Backspace');
+  await editor.pressSequentially('\\cauchy');
+  await expect(page.getByRole('option')).toContainText('Cauchy sequence');
+  await editor.press('Enter');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', '[Cauchy sequence](statement:cauchy)');
+});
+
+test('asynchronous reference searches ignore stale replies and recover after errors', async ({ page }) => {
+  await openFixture(page, '', { editing: true, references: 'async' });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.pressSequentially('\\slow');
+  await editor.press('ControlOrMeta+A');
+  await editor.pressSequentially('\\cauchy');
+  await expect(page.getByRole('option')).toHaveCount(1);
+  await expect(page.getByRole('option')).toContainText('Cauchy sequence');
+  await page.waitForTimeout(300);
+  await expect(page.getByRole('option')).toContainText('Cauchy sequence');
+  await editor.press('ControlOrMeta+A');
+  await editor.pressSequentially('\\error');
+  await expect(page.getByRole('listbox').getByRole('status')).toHaveText('Reference search failed. Keep typing to retry.');
+  await editor.press('ControlOrMeta+A');
+  await editor.pressSequentially('\\riesz');
+  await expect(page.getByRole('option')).toContainText('Riesz–Fischer');
+});
+
+test('reference search waits until IME composition ends', async ({ page }) => {
+  await openFixture(page, '', { editing: true, references: '1' });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.evaluate((element) => {
+    element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }));
+    element.textContent = '\\cauchy';
+    window.editorTest.setCaretPosition(element as HTMLElement, 7);
+    element.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertCompositionText', isComposing: true }));
+  });
+  await expect(page.getByRole('listbox')).toHaveCount(0);
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', '');
+  await editor.evaluate((element) => element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true })));
+  await expect(page.getByRole('option')).toContainText('Cauchy sequence');
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', '\\cauchy');
+});
+
+test('source toolbar replaces the selected range without committing blur and supports undo', async ({ page }) => {
+  await openFixture(page, 'Hello world', { editing: true });
+  const editor = page.getByRole('textbox', { name: 'Text editor' });
+  await editor.evaluate((element) => window.editorTest.setTextEditorSelection(element as HTMLElement, { anchor: 6, focus: 11 }));
+  await settleSelection(page);
+  await page.getByRole('button', { name: 'Insert toolbar text' }).click();
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'Hello inserted');
+  await expect(page.getByTestId('blur-count')).toHaveText('0');
+  await page.getByRole('button', { name: 'Toolbar undo' }).click();
+  await expect(page.getByTestId('value')).toHaveJSProperty('textContent', 'Hello world');
+});
 
 async function sourceText(editor: Locator) {
   return editor.evaluate((element) => window.editorTest.domToText(element as HTMLElement));

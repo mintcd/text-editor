@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { TextEditorHistory, type TextEditorSnapshot } from '../textEditor.history';
+import { TextEditorHistory, type TextEditorSnapshot } from '../textEditor.history.ts';
 
 const snapshot = (text: string, anchor = text.length, focus = anchor): TextEditorSnapshot => ({
   text,

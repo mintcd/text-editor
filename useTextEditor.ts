@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ClipboardEvent } from 'react';
-import { TextEditorHistory, type TextEditorSnapshot } from './textEditor.history';
+import { TextEditorHistory, type TextEditorSnapshot } from './textEditor.history.ts';
 import {
   domToText,
   getCaretCharacterOffsetWithin,
@@ -10,13 +10,14 @@ import {
   setCaretPosition,
   setTextEditorSelection,
   textToHtml,
-} from './textEditor.utils';
+} from './textEditor.utils.ts';
 import {
   defaultTextEditorPlugins,
   getTokenAtOffset,
   type TextEditorPlugin,
   type TextEditorToken,
-} from './textEditor.plugins';
+} from './textEditor.plugins.ts';
+import { filterReferenceItems, findReferenceQuery, type ReferenceQuery, type SearchTextEditorReferences, type TextEditorReference } from './textEditor.references.ts';
 
 export interface UseTextEditorParams {
   value?: string;
@@ -27,6 +28,9 @@ export interface UseTextEditorParams {
   plugins?: TextEditorPlugin[];
   /** Pass the component's edit mode so newly mounted editable nodes initialize. */
   isEditing?: boolean;
+  references?: readonly TextEditorReference[];
+  searchReferences?: SearchTextEditorReferences;
+  readOnly?: boolean;
 }
 
 export interface ActiveTextEditorToken {
@@ -57,6 +61,9 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
   onInitialCaretAssigned,
   plugins = defaultTextEditorPlugins,
   isEditing = true,
+  references,
+  searchReferences,
+  readOnly = false,
 }: UseTextEditorParams) {
   const editableRef = useRef<EditableElement | null>(null);
   const [activeToken, setActiveToken] = useState<ActiveTextEditorToken | null>(null);
@@ -71,6 +78,61 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
   const mountedElement = useRef<HTMLElement | null>(null);
   const latest = useRef({ value, onInitialCaretAssigned });
   latest.current = { value, onInitialCaretAssigned };
+  const [referenceQuery, setReferenceQuery] = useState<ReferenceQuery | null>(null);
+  const [referenceItems, setReferenceItems] = useState<TextEditorReference[]>([]);
+  const [referenceStatus, setReferenceStatus] = useState<'loading' | 'ready' | 'error'>('ready');
+  const [referencePosition, setReferencePosition] = useState<{ top: number; left: number } | null>(null);
+  const [referenceIndex, setReferenceIndex] = useState(0);
+  const dismissedReference = useRef<string | null>(null);
+  const referenceState = useRef({ query: referenceQuery, items: referenceItems, index: referenceIndex });
+  referenceState.current = { query: referenceQuery, items: referenceItems, index: referenceIndex };
+  const lastSelection = useRef<{ anchor: number; focus: number } | null>(null);
+
+  const closeReferences = useCallback(() => {
+    const element = editableRef.current;
+    const selection = element ? getTextEditorSelection(element) : null;
+    if (element && selection) dismissedReference.current = `${domToText(element)}\0${selection.focus}`;
+    setReferenceQuery(null);
+    setReferenceItems([]);
+  }, []);
+
+  const updateReferences = useCallback((text: string, caret: number) => {
+    const signature = `${text}\0${caret}`;
+    if (dismissedReference.current !== null && dismissedReference.current !== signature) dismissedReference.current = null;
+    if (readOnly || (!references && !searchReferences) || composing.current || dismissedReference.current === signature) {
+      setReferenceQuery(null);
+      return;
+    }
+    const query = findReferenceQuery(text, caret);
+    setReferenceQuery((previous) => previous?.start === query?.start && previous?.end === query?.end && previous?.query === query?.query ? previous : query);
+    if (query) {
+      const selection = document.getSelection();
+      const rect = selection?.rangeCount ? selection.getRangeAt(0).getBoundingClientRect() : null;
+      if (rect) setReferencePosition({ top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - 230)), left: Math.max(8, Math.min(rect.left, window.innerWidth - 330)) });
+    }
+  }, [references, searchReferences, readOnly]);
+
+  useEffect(() => { if (readOnly) setReferenceQuery(null); }, [readOnly]);
+
+  useEffect(() => {
+    if (!referenceQuery) { setReferenceItems([]); return; }
+    const controller = new AbortController();
+    setReferenceStatus('loading');
+    setReferenceItems([]);
+    setReferenceIndex(0);
+    Promise.resolve().then(() => searchReferences ? searchReferences(referenceQuery.query, { signal: controller.signal }) : references ?? [])
+      .then((items) => {
+        if (controller.signal.aborted) return;
+        if (!Array.isArray(items)) throw new Error('Reference search must return an array');
+        setReferenceItems(filterReferenceItems(items, referenceQuery.query));
+        setReferenceStatus('ready');
+      }).catch(() => {
+        if (controller.signal.aborted) return;
+        setReferenceItems([]);
+        setReferenceStatus('error');
+      });
+    return () => controller.abort();
+  }, [referenceQuery?.query, Boolean(referenceQuery), references, searchReferences]);
 
   const clearPreview = useCallback(() => {
     setActiveToken(null);
@@ -106,6 +168,8 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     if (starting || externalChange) {
       history.current.reset();
       pendingInput.current = null;
+      dismissedReference.current = null;
+      setReferenceQuery(null);
     }
     const selection = getTextEditorSelection(element);
     const focused = document.activeElement === element;
@@ -123,6 +187,7 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     else {
       composing.current = false;
       clearPreview();
+      setReferenceQuery(null);
     }
     return () => {
       if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -132,6 +197,7 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
   }, [isEditing, clearPreview]);
 
   const showPreview = useCallback((text: string, caret: number) => {
+    updateReferences(text, caret);
     const token = getTokenAtOffset(text, caret, plugins);
     if (token?.plugin.renderFloatingPreview) {
       setActiveToken({ plugin: token.plugin, token });
@@ -139,14 +205,16 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     } else {
       clearPreview();
     }
-  }, [plugins, clearPreview]);
+  }, [plugins, clearPreview, updateReferences]);
 
   const updateActiveToken = useCallback(() => {
     const element = editableRef.current;
     if (!isEditing || !element || composing.current || changingDom.current) return;
     const selection = getTextEditorSelection(element);
+    if (selection) lastSelection.current = selection;
     if (!selection || selection.anchor !== selection.focus) {
       clearPreview();
+      setReferenceQuery(null);
       return;
     }
     const text = domToText(element);
@@ -243,19 +311,20 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
 
   const handleInput = useCallback(() => {
     const element = editableRef.current;
-    if (!element || composing.current) return;
+    if (!element || composing.current || readOnly) return;
     const text = domToText(element);
     const caret = getCaretCharacterOffsetWithin(element);
     rewrite(element, text, caret);
     notifyChange(text);
     showPreview(text, caret);
-  }, [rewrite, notifyChange, showPreview]);
+  }, [rewrite, notifyChange, showPreview, readOnly]);
 
   const handleCompositionStart = useCallback(() => {
     composing.current = true;
     const before = snapshot();
     if (before) pendingInput.current = { snapshot: before, kind: 'insertCompositionText' };
     clearPreview();
+    setReferenceQuery(null);
   }, [clearPreview, snapshot]);
 
   const handleCompositionEnd = useCallback(() => {
@@ -265,8 +334,8 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
 
   const insertText = useCallback((text: string, kind = 'insertFromPaste') => {
     const element = editableRef.current;
-    if (!element) return;
-    const selection = getTextEditorSelection(element);
+    if (!element || readOnly) return;
+    const selection = getTextEditorSelection(element) ?? lastSelection.current ?? { anchor: domToText(element).length, focus: domToText(element).length };
     if (!selection) return;
     const source = domToText(element);
     pendingInput.current = { snapshot: { text: source, selection }, kind };
@@ -276,7 +345,28 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     rewrite(element, next, start + text.length);
     setCaretPosition(element, start + text.length);
     notifyChange(next);
-  }, [rewrite, notifyChange]);
+    lastSelection.current = { anchor: start + text.length, focus: start + text.length };
+    updateReferences(next, start + text.length);
+  }, [rewrite, notifyChange, updateReferences, readOnly]);
+
+  const selectReference = useCallback((item: TextEditorReference) => {
+    const element = editableRef.current;
+    const query = referenceState.current.query;
+    if (!element || !query || composing.current || readOnly) return;
+    const source = domToText(element);
+    const selection = getTextEditorSelection(element);
+    if (!selection || selection.anchor !== selection.focus || selection.focus !== query.end || source.slice(query.start, query.end) !== `\\${query.query}`) { closeReferences(); return; }
+    pendingInput.current = { snapshot: { text: source, selection }, kind: 'insertReference' };
+    const next = source.slice(0, query.start) + item.text + source.slice(query.end);
+    const caret = query.start + item.text.length;
+    rewrite(element, next, caret);
+    element.focus();
+    setCaretPosition(element, caret);
+    lastSelection.current = { anchor: caret, focus: caret };
+    notifyChange(next);
+    dismissedReference.current = `${next}\0${caret}`;
+    setReferenceQuery(null);
+  }, [closeReferences, notifyChange, rewrite, readOnly]);
 
   // Native pre-wrap Enter can insert an extra invisible LF as a caret
   // placeholder. Insert one source newline explicitly instead.
@@ -284,7 +374,7 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     const element = editableRef.current;
     if (!isEditing || !element) return;
     function handleBeforeInput(event: InputEvent) {
-      if (composing.current || event.isComposing) return;
+      if (readOnly || composing.current || event.isComposing) return;
       if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
         event.preventDefault();
         restoreHistory(event.inputType === 'historyUndo' ? 'undo' : 'redo');
@@ -297,7 +387,18 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
       }
     }
     function handleKeyDown(event: KeyboardEvent) {
-      if (composing.current || event.isComposing || event.altKey || !(event.ctrlKey || event.metaKey)) return;
+      if (readOnly || composing.current || event.isComposing) return;
+      const menu = referenceState.current;
+      if (menu.query && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeReferences(); return; }
+        if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && menu.items.length) {
+          event.preventDefault(); event.stopPropagation();
+          setReferenceIndex((index) => (index + (event.key === 'ArrowDown' ? 1 : -1) + menu.items.length) % menu.items.length);
+          return;
+        }
+        if (event.key === 'Enter' && menu.items[menu.index]) { event.preventDefault(); event.stopPropagation(); selectReference(menu.items[menu.index]); return; }
+      }
+      if (event.altKey || !(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
       if (key !== 'z' && !(key === 'y' && event.ctrlKey)) return;
       event.preventDefault();
@@ -310,7 +411,7 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
       element.removeEventListener('beforeinput', handleBeforeInput);
       element.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isEditing, insertText, restoreHistory, snapshot]);
+  }, [isEditing, insertText, restoreHistory, snapshot, closeReferences, selectReference, readOnly]);
 
   const handlePaste = useCallback((event: ClipboardEvent<HTMLElement>) => {
     event.preventDefault();
@@ -343,6 +444,7 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     notifyChange(text);
     committed.current = true;
     clearPreview();
+    setReferenceQuery(null);
     onBlur?.(text);
   }, [onBlur, notifyChange, clearPreview]);
 
@@ -364,5 +466,23 @@ export function useTextEditor<EditableElement extends HTMLElement = HTMLDivEleme
     handleCut,
     handleCompositionStart,
     handleCompositionEnd,
+    referenceQuery,
+    referenceItems,
+    referenceStatus,
+    referencePosition,
+    referenceIndex,
+    selectReference,
+    closeReferences,
+    insertText,
+    undo: () => { if (!readOnly) restoreHistory('undo'); },
+    redo: () => { if (!readOnly) restoreHistory('redo'); },
+    getSelection: () => {
+      const element = editableRef.current;
+      if (!element) return null;
+      const selected = getTextEditorSelection(element) ?? lastSelection.current;
+      if (!selected) return null;
+      const start = Math.min(selected.anchor, selected.focus), end = Math.max(selected.anchor, selected.focus);
+      return { start, end, text: domToText(element).slice(start, end) };
+    },
   };
 }

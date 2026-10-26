@@ -1,11 +1,12 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import TextEditor from '../../TextEditor';
+import TextEditor, { type TextEditorHandle } from '../../TextEditor.tsx';
+import { filterReferenceItems, type TextEditorReference, type SearchTextEditorReferences } from '../../textEditor.references.ts';
 import {
   escapeHtml,
   renderTokenSpan,
   type TextEditorPlugin,
-} from '../../textEditor.plugins';
+} from '../../textEditor.plugins.ts';
 import './style.css';
 import {
   domToText,
@@ -15,7 +16,7 @@ import {
   setCaretPosition,
   getTextEditorSelection,
   setTextEditorSelection,
-} from '../../textEditor.utils';
+} from '../../textEditor.utils.ts';
 
 const editorTest = {
   domToText,
@@ -64,8 +65,21 @@ const pageReferencePlugin: TextEditorPlugin = {
 };
 const customPlugins = [pageReferencePlugin];
 const noPlugins: TextEditorPlugin[] = [];
+const referenceItems: TextEditorReference[] = [
+  { id: 'cauchy', label: 'Cauchy sequence', description: 'Definition · convergence', text: '[Cauchy sequence](statement:cauchy)' },
+  { id: 'egoroff', label: 'Egoroff theorem', description: 'Theorem · measure theory', text: '[Egoroff theorem](statement:egoroff)' },
+  { id: 'riesz', label: 'Riesz–Fischer', description: 'Completeness in Lp', text: '[Riesz–Fischer](statement:riesz)' },
+];
+const asyncReferences: SearchTextEditorReferences = (query) => new Promise((resolve, reject) => {
+  window.setTimeout(() => {
+    if (query === 'error') reject(new Error('Search unavailable'));
+    else if (query === 'slow') resolve([{ id: 'slow', label: 'slow result', text: 'slow result' }]);
+    else resolve(filterReferenceItems(referenceItems, query));
+  }, query === 'slow' ? 250 : 10);
+});
 
 function Fixture() {
+  const editorRef = useRef<TextEditorHandle>(null);
   const query = new URLSearchParams(window.location.search);
   const [value, setValue] = useState(() => query.get('value') ?? 'Hello $x$');
   const [isEditing, setIsEditing] = useState(() => query.get('editing') === '1');
@@ -92,6 +106,8 @@ function Fixture() {
           onClick={() => setValue('External replacement $y$')}
         >Replace value while focused</button>
         <button data-testid="outside">Outside target</button>
+        <button onPointerDown={(event) => event.preventDefault()} onMouseDown={(event) => event.preventDefault()} onClick={() => editorRef.current?.insertText('inserted')}>Insert toolbar text</button>
+        <button onPointerDown={(event) => event.preventDefault()} onMouseDown={(event) => event.preventDefault()} onClick={() => editorRef.current?.undo()}>Toolbar undo</button>
       </div>
       <div className="editor-host" data-testid="editor-region">
         <TextEditor
@@ -106,6 +122,9 @@ function Fixture() {
             setIsEditing(true);
           }}
           plugins={plugins}
+          references={query.get('references') === '1' ? referenceItems : undefined}
+          searchReferences={query.get('references') === 'async' ? asyncReferences : undefined}
+          editorRef={editorRef}
         />
       </div>
       <p>Controlled value:</p>

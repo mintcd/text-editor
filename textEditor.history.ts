@@ -20,7 +20,9 @@ export class TextEditorHistory {
   private redoStack: TextEditorSnapshot[] = [];
   private lastEdit: { kind: string; after: TextEditorSnapshot; time: number } | null = null;
 
-  constructor(private readonly now: () => number = Date.now) {}
+  private readonly now: () => number;
+
+  constructor(now: () => number = Date.now) { this.now = now; }
 
   record(before: TextEditorSnapshot, after: TextEditorSnapshot, kind: string): void {
     if (before.text === after.text) {

@@ -2,9 +2,9 @@
 
 import type { CSSProperties } from 'react';
 import 'katex/dist/katex.min.css';
-import { renderLatexFragment } from './latexRenderer';
+import { renderLatexFragment } from './latexRenderer.ts';
 
-export { renderLatexFragment } from './latexRenderer';
+export { renderLatexFragment } from './latexRenderer.ts';
 
 export default function Latex({ children, style }: {
   children: string,

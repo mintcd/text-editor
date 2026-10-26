@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { findLatexFragments, renderLatexFragment } from '../latexRenderer';
+import { findLatexFragments, renderLatexFragment } from '../latexRenderer.ts';
 
 test('prose is escaped before inserting generated HTML', () => {
   assert.equal(

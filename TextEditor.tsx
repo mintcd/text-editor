@@ -1,10 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties, MouseEvent, ReactNode } from 'react';
-import { useTextEditor } from './useTextEditor';
-import { defaultTextEditorPlugins, type TextEditorPlugin } from './textEditor.plugins';
-import { textToHtml } from './textEditor.utils';
+import { useEffect, useId, useImperativeHandle, useRef, useState } from 'react';
+import type { CSSProperties, MouseEvent, ReactNode, Ref } from 'react';
+import { useTextEditor } from './useTextEditor.ts';
+import { defaultTextEditorPlugins, type TextEditorPlugin } from './textEditor.plugins.ts';
+import { textToHtml } from './textEditor.utils.ts';
+import type { SearchTextEditorReferences, TextEditorReference } from './textEditor.references.ts';
+
+export interface TextEditorHandle {
+  focus(): void;
+  insertText(text: string): void;
+  getSelection(): { start: number; end: number; text: string } | null;
+  undo(): void;
+  redo(): void;
+}
 
 export interface TextEditorProps {
   value?: string;
@@ -19,6 +28,10 @@ export interface TextEditorProps {
   preserveHeightOnEdit?: boolean;
   plugins?: TextEditorPlugin[];
   'aria-label'?: string;
+  references?: readonly TextEditorReference[];
+  searchReferences?: SearchTextEditorReferences;
+  editorRef?: Ref<TextEditorHandle>;
+  readOnly?: boolean;
 }
 
 export default function TextEditor({
@@ -34,7 +47,12 @@ export default function TextEditor({
   preserveHeightOnEdit = true,
   plugins = defaultTextEditorPlugins,
   'aria-label': label = 'Text editor',
+  references,
+  searchReferences,
+  editorRef,
+  readOnly = false,
 }: TextEditorProps) {
+  const referenceListId = useId();
   const previewRef = useRef<HTMLSpanElement | null>(null);
   const [measuredPreviewHeight, setMeasuredPreviewHeight] = useState<number | null>(null);
   const {
@@ -49,9 +67,29 @@ export default function TextEditor({
     handleCut,
     handleCompositionStart,
     handleCompositionEnd,
+    referenceQuery,
+    referenceItems,
+    referenceStatus,
+    referencePosition,
+    referenceIndex,
+    selectReference,
+    insertText,
+    getSelection,
+    undo,
+    redo,
   } = useTextEditor<HTMLSpanElement>({
     value, onChange, onBlur, initialCaretPoint, onInitialCaretAssigned, plugins, isEditing,
+    references, searchReferences, readOnly,
   });
+
+  useImperativeHandle(editorRef, () => ({
+    focus: () => editableRef.current?.focus(),
+    insertText: (text) => { editableRef.current?.focus(); insertText(text, 'insertFromToolbar'); },
+    getSelection, undo, redo,
+  }), [editableRef, insertText, getSelection, undo, redo]);
+  useEffect(() => {
+    if (referenceQuery && referenceItems[referenceIndex]) document.getElementById(`${referenceListId}-${referenceIndex}`)?.scrollIntoView({ block: 'nearest' });
+  }, [referenceQuery, referenceIndex, referenceItems, referenceListId]);
 
   function startEditing(point?: { x: number; y: number }) {
     if (previewRef.current && preserveHeightOnEdit) {
@@ -68,6 +106,7 @@ export default function TextEditor({
   useEffect(() => {
     if (!isEditing) return;
     function onOutsidePointer(event: Event) {
+      if (event.defaultPrevented) return;
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (editableRef.current?.contains(target)) return;
@@ -110,11 +149,17 @@ export default function TextEditor({
         <>
           <span
             ref={editableRef}
-            contentEditable
+            contentEditable={!readOnly}
             suppressContentEditableWarning
             role="textbox"
             aria-label={label}
             aria-multiline
+            aria-readonly={readOnly}
+            aria-autocomplete={references || searchReferences ? 'list' : undefined}
+            aria-haspopup={references || searchReferences ? 'listbox' : undefined}
+            aria-expanded={references || searchReferences ? Boolean(referenceQuery) : undefined}
+            aria-controls={referenceQuery ? referenceListId : undefined}
+            aria-activedescendant={referenceQuery && referenceItems[referenceIndex] ? `${referenceListId}-${referenceIndex}` : undefined}
             className={'min-h-5 wrap-break-word text-inherit whitespace-pre-wrap ' + (inline ? 'inline-block' : 'block')}
             onInput={handleInput}
             onBlur={handleBlur}
@@ -126,6 +171,33 @@ export default function TextEditor({
             onCompositionEnd={handleCompositionEnd}
             style={editableStyle}
           />
+          {referenceQuery && referencePosition && !readOnly && (
+            <div
+              id={referenceListId}
+              role="listbox"
+              aria-label="References"
+              onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+              onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+              style={{ position: 'fixed', zIndex: 1000, top: referencePosition.top, left: referencePosition.left, width: 320, maxWidth: 'calc(100vw - 16px)', maxHeight: 220, overflowY: 'auto', background: '#fff', color: '#17223b', border: '1px solid #d6dcea', borderRadius: 8, boxShadow: '0 8px 24px #18263c26', padding: 5, font: '14px/1.4 system-ui, sans-serif' }}
+            >
+              <div style={{ padding: '5px 8px', color: '#63708b', fontSize: 12 }}>References · type to search</div>
+              {referenceStatus !== 'ready' || !referenceItems.length ? (
+                <div role="status" style={{ padding: '8px' }}>{referenceStatus === 'loading' ? 'Searching references…' : referenceStatus === 'error' ? 'Reference search failed. Keep typing to retry.' : 'No matching references.'}</div>
+              ) : referenceItems.map((item, index) => (
+                <div
+                  key={item.id}
+                  id={`${referenceListId}-${index}`}
+                  role="option"
+                  aria-selected={index === referenceIndex}
+                  onClick={() => selectReference(item)}
+                  style={{ padding: '7px 9px', cursor: 'pointer', borderRadius: 5, background: index === referenceIndex ? '#edf2ff' : undefined }}
+                >
+                  <div>{item.label}</div>
+                  {item.description && <div style={{ color: '#63708b', fontSize: 12 }}>{item.description}</div>}
+                </div>
+              ))}
+            </div>
+          )}
           {activePreview && previewPos && (
             <div
               className="z-50 p-2 rounded bg-white dark:bg-gray-700 shadow-lg"

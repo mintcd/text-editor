@@ -5,7 +5,7 @@ import {
   latexPlugin,
   mathRegex,
   type TextEditorPlugin,
-} from './textEditor.plugins';
+} from './textEditor.plugins.ts';
 
 export { escapeHtml, mathRegex };
 

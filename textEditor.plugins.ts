@@ -1,6 +1,6 @@
 import { createElement, type ReactNode } from 'react';
-import Latex from './Latex';
-import { findLatexFragments, renderLatexFragment } from './latexRenderer';
+import Latex from './Latex.tsx';
+import { findLatexFragments, renderLatexFragment } from './latexRenderer.ts';
 
 export type TextEditorTokenMode = 'active' | 'inactive';
 
